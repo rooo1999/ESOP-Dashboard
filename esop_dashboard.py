@@ -275,8 +275,8 @@ with st.sidebar:
     tax_rate = tax_slab_pct / 100
 
 st.markdown(
-    '<div class="section-note">Tax rates used below — LTCG 12.5% beyond a 1-year holding from the exercise date, '
-    'STCG 20% within 1 year, Rs. 1.25L LTCG exemption per year, perquisite tax at the slab rate entered in the sidebar on exercise — '
+    '<div class="section-note">Tax rates used below - LTCG 12.5% beyond a 1-year holding from the exercise date, '
+    'STCG 20% within 1 year, Rs. 1.25L LTCG exemption per year, perquisite tax at the slab rate entered in the sidebar on exercise - '
     'reflect rules as of FY2024-25. </div>',
     unsafe_allow_html=True
 )
