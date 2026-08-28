@@ -274,8 +274,8 @@ with st.sidebar:
     cess = 0.04
 
 st.markdown(
-    '<div class="section-note">Tax rates used below — LTCG 12.5% beyond a 1-year holding from the exercise date, '
-    'STCG 20% within 1 year, Rs. 1.25L LTCG exemption per year, perquisite tax at slab + 4% cess on exercise — '
+    '<div class="section-note">Tax rates used below - LTCG 12.5% beyond a 1-year holding from the exercise date, '
+    'STCG 20% within 1 year, Rs. 1.25L LTCG exemption per year, perquisite tax at slab + 4% cess on exercise - '
     'reflect rules as of FY2024-25. </div>',
     unsafe_allow_html=True
 )
