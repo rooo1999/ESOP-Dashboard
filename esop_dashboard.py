@@ -375,10 +375,15 @@ with tabs[0]:
         hide_index=True,
         key="schedule_editor",
     )
+    # Quantity and Vest Date are user-editable above; recompute Cumulative Vested from
+    # scratch each run (sorted by date) rather than trusting the stored, disabled column —
+    # otherwise it silently goes stale the moment someone edits a quantity or a date.
+    edited["Vest Date"] = pd.to_datetime(edited["Vest Date"])
+    edited = edited.sort_values("Vest Date").reset_index(drop=True)
+    edited["Cumulative Vested"] = edited["Quantity"].cumsum()
     st.session_state.schedule_df = edited
 
     today = pd.Timestamp(date.today())
-    edited["Vest Date"] = pd.to_datetime(edited["Vest Date"])
     edited["Status"] = np.where(edited["Vest Date"] <= today, "Vested", "Upcoming")
 
     vested_qty = int(edited.loc[edited["Status"] == "Vested", "Quantity"].sum())
@@ -469,9 +474,13 @@ with tabs[1]:
     vested_exercise_cost = float((edited.loc[edited["Status"] == "Vested", "Quantity"] *
                                    edited.loc[edited["Status"] == "Vested", "Strike Price"]).sum())
 
+    # Clip each tranche's perquisite gain at zero individually before summing — an underwater
+    # tranche (FMV at exercise below strike, e.g. after a down-round) can't generate negative
+    # perquisite tax that offsets other tranches' gains; its own contribution is simply zero.
     perq_gain = float((edited.loc[exercised_mask, "Quantity"] *
-                        (edited.loc[exercised_mask, "FMV at Exercise (Rs.)"] - edited.loc[exercised_mask, "Strike Price"])).sum())
-    perq_tax_paid_estimate = max(perq_gain, 0) * tax_rate
+                        (edited.loc[exercised_mask, "FMV at Exercise (Rs.)"] - edited.loc[exercised_mask, "Strike Price"])
+                        ).clip(lower=0).sum())
+    perq_tax_paid_estimate = perq_gain * tax_rate
 
     unexercised_vested_mask = (edited["Status"] == "Vested") & (~exercised_mask)
     perq_gain_if_now = float((edited.loc[unexercised_vested_mask, "Quantity"] *
@@ -528,7 +537,9 @@ with tabs[1]:
         ex_df["Exercise Date"] = pd.to_datetime(ex_df["Exercise Date"])
         ex_df["LTCG eligible from"] = ex_df["Exercise Date"] + pd.DateOffset(years=1)
         ex_df["Holding today (days)"] = (today - ex_df["Exercise Date"]).dt.days
-        ex_df["Gain type today"] = np.where(ex_df["Holding today (days)"] >= 365, "LTCG (12.5%)", "STCG (20%)")
+        # Compare against the exact 1-year anniversary date above, not a flat 365-day count —
+        # keeps this consistent with "LTCG eligible from" and correct across leap years.
+        ex_df["Gain type today"] = np.where(today >= ex_df["LTCG eligible from"], "LTCG (12.5%)", "STCG (20%)")
         ex_df["Notional gain (Rs.)"] = ex_df["Quantity"] * (current_price - ex_df["FMV at Exercise (Rs.)"])
         st.dataframe(
             ex_df,
@@ -649,8 +660,9 @@ with tabs[2]:
                 take = min(lot_qty, still_needed)
                 exercised_pool[pool_idx][0] -= take
                 still_needed -= take
-                held_days = (leg_date - lot_date).days
-                long_term = held_days >= 365
+                # Exact 1-year anniversary of the exercise date, consistent with the Value & Tax
+                # tab's "LTCG eligible from" — not a flat 365-day count.
+                long_term = leg_date >= (lot_date + pd.DateOffset(years=1))
                 gain = max(take * (projected_price - lot_fmv), 0)
                 if long_term:
                     ltcg_gain_leg += gain
@@ -793,6 +805,42 @@ def stretch_schedule(base_pcts, n_out):
             if overlap > 0:
                 out[j] += val * (overlap / (in_end - in_start))
     return out
+
+
+def ipf_balance(seed, row_totals, col_totals, iters=200, tol=1e-9):
+    """Iterative proportional fitting (RAS / biproportional scaling).
+
+    `seed` is a category x leg matrix built from each category's own timing
+    shape (row-normalised). Taken on its own, its row sums equal each
+    category's total corpus, but its column sums (money placed in a given
+    exit leg, across all categories) generally do NOT equal that leg's net
+    proceeds — the timing shapes were set independently per category.
+
+    This repeatedly rescales rows to match `row_totals` (category corpus)
+    and columns to match `col_totals` (leg net proceeds) in alternation.
+    Column scaling is always applied last, so columns end up matching
+    `col_totals` essentially exactly. Row totals match too whenever the
+    timing shapes make that feasible (which they do whenever the exit
+    legs are reasonably close in size — the normal case); with sharply
+    uneven legs and categories that are 0% in some legs, an exact
+    row+column match can become mathematically infeasible, and IPF finds
+    the closest proportional fit while still hitting column totals exactly.
+    A cell that is structurally zero (0% in the schedule) stays zero.
+    """
+    m = seed.astype(float).copy()
+    row_totals = np.asarray(row_totals, dtype=float)
+    col_totals = np.asarray(col_totals, dtype=float)
+    for _ in range(iters):
+        row_sums = m.sum(axis=1)
+        rf = np.divide(row_totals, row_sums, out=np.ones_like(row_totals), where=row_sums > 1e-9)
+        m = m * rf[:, None]
+        col_sums = m.sum(axis=0)
+        cf = np.divide(col_totals, col_sums, out=np.ones_like(col_totals), where=col_sums > 1e-9)
+        m = m * cf[None, :]
+        if (np.abs(m.sum(axis=1) - row_totals).max() < tol
+                and np.abs(m.sum(axis=0) - col_totals).max() < tol):
+            break
+    return m
 
 with tabs[3]:
     st.subheader("Where the exited money goes")
@@ -1011,30 +1059,73 @@ with tabs[4]:
         if off_rows:
             st.warning("These categories don't add up to 100% across the tranches: " + ", ".join(off_rows))
 
-        # Rs. amount deployed per category per leg = category's total corpus x that leg's % share.
+        # Build a seed matrix from each category's own timing shape — on its own this makes each
+        # category's ROW sum to its total corpus, but says nothing about whether a given leg's
+        # COLUMN sums to that leg's actual net proceeds (it generally won't — see ipf_balance()).
+        # We then biproportionally rescale the seed so columns match leg net proceeds exactly,
+        # while keeping row totals matching category corpus wherever the timing shapes allow it.
+        cat_totals_rs = np.array([float(amounts_cr.get(cat, 0.0)) * 1e7 for cat in categories])
+        leg_totals_rs = tranche_plan_df["Est. net proceeds"].to_numpy(dtype=float)
+
+        total_corpus_rs, total_proceeds_rs = cat_totals_rs.sum(), leg_totals_rs.sum()
+        total_gap = abs(total_corpus_rs - total_proceeds_rs)
+        if total_gap > max(1000.0, 0.005 * max(total_corpus_rs, total_proceeds_rs, 1.0)):
+            st.warning(
+                f"Your Deployment Plan corpus (Rs. {total_corpus_rs/1e7:,.2f} Cr) and this Exit Plan's total net "
+                f"proceeds (Rs. {total_proceeds_rs/1e7:,.2f} Cr) don't match right now — every leg below will still "
+                f"deploy exactly its own net proceeds, but each category's actual total will scale up or down from "
+                f"its Deployment Plan figure to make that work. Go to the Deployment Plan tab and hit \"Reset to "
+                f"default split\" to resync the two."
+            )
+
+        seed = np.zeros((len(categories), n_out))
+        uniform_fallback = []
+        for ci, cat in enumerate(categories):
+            pcts = schedule_edited.loc[schedule_edited["Category"] == cat, leg_labels].iloc[0].to_numpy(dtype=float)
+            if pcts.sum() <= 1e-9 and cat_totals_rs[ci] > 0:
+                # No timing set at all for a category that has money to place — spread it evenly
+                # rather than silently dropping it from every leg.
+                pcts = np.full(n_out, 100.0 / n_out)
+                uniform_fallback.append(cat)
+            seed[ci] = cat_totals_rs[ci] * pcts / 100.0
+
+        if uniform_fallback:
+            st.info("No timing set for: " + ", ".join(uniform_fallback) + " — spreading evenly across legs until you set one.")
+
+        if leg_totals_rs.sum() > 0 and cat_totals_rs.sum() > 0:
+            balanced = ipf_balance(seed, cat_totals_rs, leg_totals_rs)
+        else:
+            balanced = seed
+
         rows = []
-        for _, leg in tranche_plan_df.iterrows():
-            leg_name = leg["Leg"]
-            row = {"Leg": leg_name, "Suggested date": leg["Suggested date"], "Net proceeds": leg["Est. net proceeds"]}
-            for cat in categories:
-                pct_row = schedule_edited.loc[schedule_edited["Category"] == cat, leg_name]
-                pct = float(pct_row.iloc[0]) if not pct_row.empty else 0.0
-                cat_total_rs = float(amounts_cr.get(cat, 0.0)) * 1e7
-                row[cat] = cat_total_rs * pct / 100
+        for li in range(n_out):
+            leg = tranche_plan_df.iloc[li]
+            row = {"Leg": leg["Leg"], "Suggested date": leg["Suggested date"], "Net proceeds": float(leg["Est. net proceeds"])}
+            for ci, cat in enumerate(categories):
+                row[cat] = float(balanced[ci, li])
+            row["Deployed (check)"] = float(balanced[:, li].sum())
             rows.append(row)
         tranche_deploy_df = pd.DataFrame(rows)
 
         st.write("")
         st.markdown("##### Rs. deployed by category, per tranche")
-        col_config = {"Net proceeds": st.column_config.NumberColumn(format="Rs. %,.0f")}
+        st.caption("\"Deployed (check)\" is the sum across categories for that leg — it should match \"Net proceeds\" "
+                   "exactly; that's the reconciliation this table is built to guarantee.")
+        col_config = {
+            "Net proceeds": st.column_config.NumberColumn(format="Rs. %,.0f"),
+            "Deployed (check)": st.column_config.NumberColumn(format="Rs. %,.0f"),
+        }
         for cat in categories:
             col_config[cat] = st.column_config.NumberColumn(format="Rs. %,.0f")
 
         st.dataframe(
             tranche_deploy_df,
+            column_order=["Leg", "Suggested date", "Net proceeds", "Deployed (check)"] + categories,
             column_config=col_config,
             use_container_width=True, hide_index=True,
         )
+
+        max_leg_diff = float((tranche_deploy_df["Deployed (check)"] - tranche_deploy_df["Net proceeds"]).abs().max())
 
         totals = tranche_deploy_df[categories].sum()
         t1, t2 = st.columns(2)
@@ -1042,7 +1133,31 @@ with tabs[4]:
             kpi_card("Total net proceeds staged", inr(tranche_deploy_df["Net proceeds"].sum()),
                       f"across {len(tranche_deploy_df)} exit legs", accent=True)
         with t2:
-            kpi_card("Total deployed across categories", inr(totals.sum()), "sum of category columns above")
+            kpi_card("Total deployed across categories", inr(totals.sum()),
+                      f"largest per-leg gap: {inr(max_leg_diff)}" if max_leg_diff >= 1 else "matches exactly, leg by leg")
+
+        cat_check_df = pd.DataFrame({
+            "Category": categories,
+            "Target corpus (Deployment Plan)": cat_totals_rs,
+            "Actually staged (this schedule)": balanced.sum(axis=1),
+        })
+        cat_check_df["Difference"] = cat_check_df["Actually staged (this schedule)"] - cat_check_df["Target corpus (Deployment Plan)"]
+        cat_drift = cat_check_df.loc[cat_check_df["Difference"].abs() > max(1000.0, 0.01 * cat_totals_rs.sum()), "Category"].tolist()
+        if cat_drift:
+            with st.expander("Some categories' totals shifted to make every leg reconcile — details"):
+                st.caption("A category that's 0% in a leg can never receive money that leg, and every leg must still "
+                           "fully deploy its net proceeds — when the two constraints can't both be met exactly "
+                           "(e.g. very uneven leg sizes), the category's own total shifts slightly instead. Adjust "
+                           "the timing schedule above to correct any of these.")
+                st.dataframe(
+                    cat_check_df,
+                    column_config={
+                        "Target corpus (Deployment Plan)": st.column_config.NumberColumn(format="Rs. %,.0f"),
+                        "Actually staged (this schedule)": st.column_config.NumberColumn(format="Rs. %,.0f"),
+                        "Difference": st.column_config.NumberColumn(format="Rs. %,.0f"),
+                    },
+                    use_container_width=True, hide_index=True,
+                )
 
         st.write("")
         st.markdown("##### Category allocation per tranche")
@@ -1057,7 +1172,8 @@ with tabs[4]:
 
         st.markdown(
             '<div class="section-note">Each category\'s total corpus (from the Deployment Plan tab) is staged across '
-            'exit legs per the schedule above, not split evenly per leg — adjust the schedule as your view on timing '
-            'changes, or hit "Reset to suggested schedule" to go back to the stretched default.</div>',
+            'exit legs per the schedule above — rebalanced so every leg\'s category split sums exactly to that leg\'s '
+            'net proceeds, not just to the same grand total. Adjust the schedule as your view on timing changes, or '
+            'hit "Reset to suggested schedule" to go back to the stretched default.</div>',
             unsafe_allow_html=True
         )
