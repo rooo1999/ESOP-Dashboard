@@ -113,7 +113,9 @@ st.markdown(f"""
     .stButton > button:hover {{ border-color: {GOLD}; color: {GOLD_SOFT}; background: {CARD_BG_2}; }}
     .stButton > button:focus:not(:active) {{ border-color: {GOLD}; color: {GOLD_SOFT}; }}
 
-    div[data-testid$="RootElement"], div[data-testid$="Container"], div[data-testid="stDateInputField"] {{
+    div[data-testid="stTextInputRootElement"], div[data-testid="stTextAreaRootElement"],
+    div[data-testid="stNumberInputContainer"], div[data-testid="stDateInputField"],
+    div[data-testid="stSelectbox"] > div:last-child {{
         background-color: {CARD_BG} !important; border: 1px solid rgba(212,175,55,0.5) !important; border-radius: 8px !important;
     }}
     .streamlit-expanderHeader {{ background-color: {CARD_BG}; border-radius: 8px; }}
