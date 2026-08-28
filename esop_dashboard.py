@@ -269,14 +269,16 @@ with st.sidebar:
                                    help="Optional — set to 0 to value all future exits at today's price.")
 
     st.markdown("#### Tax Inputs")
-    tax_slab = st.selectbox("Income-tax slab (for perquisite tax)", ["30%", "20%", "10%", "5%", "0% / Nil"])
-    slab_map = {"30%": 0.30, "20%": 0.20, "10%": 0.10, "5%": 0.05, "0% / Nil": 0.0}
-    cess = 0.04
+    tax_slab_pct = st.number_input("Income-tax slab % (for perquisite tax)", min_value=0.0, max_value=100.0,
+                                    value=30.0, step=1.0,
+                                    help="Entered directly as the tax rate on perquisite income — no cess is added on top.")
+    tax_rate = tax_slab_pct / 100
 
 st.markdown(
-    '<div class="section-note">Tax rates used below - LTCG 12.5% beyond a 1-year holding from the exercise date, '
-    'STCG 20% within 1 year, Rs. 1.25L LTCG exemption per year, perquisite tax at slab + 4% cess on exercise - '
-    'reflect rules as of FY2024-25. </div>',
+    '<div class="section-note">Tax rates used below — LTCG 12.5% beyond a 1-year holding from the exercise date, '
+    'STCG 20% within 1 year, Rs. 1.25L LTCG exemption per year, perquisite tax at the slab rate entered in the sidebar on exercise — '
+    'reflect rules as of FY2024-25. Please verify current rates before advising a client; this is a planning aid, '
+    'not tax or investment advice.</div>',
     unsafe_allow_html=True
 )
 st.write("")
@@ -346,7 +348,7 @@ if st.session_state.get("grant_signature") != grant_signature:
 
 total_shares = int(sum(g["quantity"] for g in st.session_state.grants))
 
-tabs = st.tabs(["Vesting Schedule", "Value & Tax", "Exit Plan", "Deployment Plan"])
+tabs = st.tabs(["Vesting Schedule", "Value & Tax", "Exit Plan", "Deployment Plan", "Deployment by Tranche"])
 
 # --------------------------------------------------------------------------
 # TAB 1 — VESTING SCHEDULE
@@ -469,12 +471,12 @@ with tabs[1]:
 
     perq_gain = float((edited.loc[exercised_mask, "Quantity"] *
                         (edited.loc[exercised_mask, "FMV at Exercise (Rs.)"] - edited.loc[exercised_mask, "Strike Price"])).sum())
-    perq_tax_paid_estimate = max(perq_gain, 0) * (slab_map[tax_slab] + cess)
+    perq_tax_paid_estimate = max(perq_gain, 0) * tax_rate
 
     unexercised_vested_mask = (edited["Status"] == "Vested") & (~exercised_mask)
     perq_gain_if_now = float((edited.loc[unexercised_vested_mask, "Quantity"] *
                                (current_price - edited.loc[unexercised_vested_mask, "Strike Price"])).clip(lower=0).sum())
-    perq_tax_if_now = perq_gain_if_now * (slab_map[tax_slab] + cess)
+    perq_tax_if_now = perq_gain_if_now * tax_rate
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -663,7 +665,7 @@ with tabs[2]:
                 remaining_unexercised -= take
                 still_needed -= take
                 perq_gain_leg = max(take * (projected_price - avg_strike_unexercised), 0)
-                other_tax_leg += perq_gain_leg * (slab_map[tax_slab] + cess)
+                other_tax_leg += perq_gain_leg * tax_rate
                 treatments.add("Exercise + Sale")
 
             # Rs. 1.25L LTCG exemption, tracked per Indian financial year across all legs —
@@ -732,9 +734,11 @@ with tabs[2]:
         """, unsafe_allow_html=True)
 
         st.session_state["exit_plan_total_net"] = float(plan_df["Est. net proceeds"].sum())
+        st.session_state["exit_plan_df"] = plan_df.copy()
     else:
         st.info("Nothing left to plan an exit for — either no shares will be vested by lock-in end, or 100% is set to be retained above.")
         st.session_state["exit_plan_total_net"] = 0.0
+        st.session_state["exit_plan_df"] = pd.DataFrame()
 
 # --------------------------------------------------------------------------
 # TAB 4 — DEPLOYMENT PLAN
@@ -744,13 +748,13 @@ ASSET_PILL = {"Equity": "pill-gold", "Debt": "pill-silver", "Commodity": "pill-b
 CAT_PALETTE = [GOLD, SILVER, BRONZE, GOLD_SOFT, "#8A8A8A", "#E4C98A", "#9C7A4A"]
 
 DEPLOY_CATEGORIES = [
-    {"Category": "Liquid",                      "Default %": 3,  "Return Low": 6,  "Return High": 7,  "Asset Class": "Debt"},
-    {"Category": "Core Equity",                  "Default %": 33, "Return Low": 12, "Return High": 14, "Asset Class": "Equity"},
-    {"Category": "PMS Satellite",                 "Default %": 13, "Return Low": 14, "Return High": 16, "Asset Class": "Equity"},
-    {"Category": "Pvt Credit / REIT / InvIT",     "Default %": 17, "Return Low": 11, "Return High": 12, "Asset Class": "Debt"},
-    {"Category": "International",                 "Default %": 17, "Return Low": 12, "Return High": 14, "Asset Class": "Equity"},
-    {"Category": "Commodities",                    "Default %": 7,  "Return Low": 9,  "Return High": 11, "Asset Class": "Commodity"},
-    {"Category": "Private Equity",                 "Default %": 10, "Return Low": 17, "Return High": 19, "Asset Class": "Equity"},
+    {"Category": "Liquid",                      "Default %": 3,  "Return Low": 6,  "Return High": 7,  "Asset Class": "Debt",    "Liquidity": "High"},
+    {"Category": "Core Equity",                  "Default %": 33, "Return Low": 12, "Return High": 14, "Asset Class": "Equity",  "Liquidity": "High"},
+    {"Category": "PMS Satellite",                 "Default %": 13, "Return Low": 14, "Return High": 16, "Asset Class": "Equity",  "Liquidity": "High"},
+    {"Category": "Pvt Credit / REIT / InvIT",     "Default %": 17, "Return Low": 11, "Return High": 12, "Asset Class": "Debt",    "Liquidity": "Low to moderate"},
+    {"Category": "International",                 "Default %": 17, "Return Low": 12, "Return High": 14, "Asset Class": "Equity",  "Liquidity": "High"},
+    {"Category": "Commodities",                    "Default %": 7,  "Return Low": 9,  "Return High": 11, "Asset Class": "Commodity", "Liquidity": "High"},
+    {"Category": "Private Equity",                 "Default %": 10, "Return Low": 17, "Return High": 19, "Asset Class": "Equity",  "Liquidity": "Low"},
 ]
 
 with tabs[3]:
@@ -802,6 +806,9 @@ with tabs[3]:
     total_corpus_current = float(deploy_edited["Amount (Rs. Cr)"].sum())
     deploy_view = deploy_edited.copy()
     deploy_view["% of Total"] = (deploy_view["Amount (Rs. Cr)"] / total_corpus_current * 100).round(1) if total_corpus_current > 0 else 0
+    liquidity_map = {c["Category"]: c["Liquidity"] for c in DEPLOY_CATEGORIES}
+    deploy_view["Liquidity"] = deploy_view["Category"].map(liquidity_map)
+    st.session_state["deploy_split_pct"] = deploy_view.set_index("Category")["% of Total"].to_dict()
 
     st.write("")
     t1, t2 = st.columns(2)
@@ -815,7 +822,7 @@ with tabs[3]:
 
     st.markdown("##### Split summary")
     st.dataframe(
-        deploy_view[["Category", "Amount (Rs. Cr)", "% of Total", "Asset Class", "Return Low (%)", "Return High (%)"]],
+        deploy_view[["Category", "Amount (Rs. Cr)", "% of Total", "Asset Class", "Liquidity", "Return Low (%)", "Return High (%)"]],
         column_config={
             "Amount (Rs. Cr)": st.column_config.NumberColumn(format="%.2f"),
             "% of Total": st.column_config.NumberColumn(format="%.1f%%"),
@@ -884,7 +891,6 @@ with tabs[3]:
         pc_amount_rs = pc_amount_cr * 1e7
         low, high = float(pc_row.iloc[0]["Return Low (%)"]), float(pc_row.iloc[0]["Return High (%)"])
         mid = (low + high) / 2
-        tax_rate = slab_map[tax_slab] + cess
 
         income_rows = []
         for label, rate in [("Low", low), ("Mid", mid), ("High", high)]:
@@ -911,10 +917,63 @@ with tabs[3]:
             use_container_width=True, hide_index=True,
         )
 
-        fig_pc = go.Figure()
-        fig_pc.add_bar(x=income_df["Scenario"], y=income_df["Monthly net income"],
-                       marker_color=[ASSET_COLORS["Debt"]] * len(income_df), opacity=0.9)
-        fig_pc.update_layout(**PLOTLY_LAYOUT, height=300,
-                              yaxis=dict(title="Monthly net income (Rs.)", gridcolor="rgba(255,255,255,0.06)"),
+# --------------------------------------------------------------------------
+# TAB 5 — DEPLOYMENT BY TRANCHE
+# --------------------------------------------------------------------------
+with tabs[4]:
+    st.subheader("Where each exit tranche's money goes")
+    st.caption("Applies the category split from the Deployment Plan tab to the net proceeds of each exit leg from the "
+               "Exit Plan tab, so you can see where every tranche's money is earmarked to land.")
+
+    tranche_plan_df = st.session_state.get("exit_plan_df", pd.DataFrame())
+    split_pct = st.session_state.get("deploy_split_pct", {})
+
+    if tranche_plan_df.empty or not split_pct:
+        st.info("Set up an exit plan (Exit Plan tab) and a deployment split (Deployment Plan tab) first — "
+                "this tab combines the two.")
+    else:
+        categories = [c["Category"] for c in DEPLOY_CATEGORIES]
+        rows = []
+        for _, leg in tranche_plan_df.iterrows():
+            row = {"Leg": leg["Leg"], "Suggested date": leg["Suggested date"],
+                   "Net proceeds": leg["Est. net proceeds"]}
+            for cat in categories:
+                pct = split_pct.get(cat, 0.0)
+                row[cat] = leg["Est. net proceeds"] * pct / 100
+            rows.append(row)
+        tranche_deploy_df = pd.DataFrame(rows)
+
+        col_config = {"Net proceeds": st.column_config.NumberColumn(format="Rs. %,.0f")}
+        for cat in categories:
+            col_config[cat] = st.column_config.NumberColumn(format="Rs. %,.0f")
+
+        st.dataframe(
+            tranche_deploy_df,
+            column_config=col_config,
+            use_container_width=True, hide_index=True,
+        )
+
+        totals = tranche_deploy_df[categories].sum()
+        t1, t2 = st.columns(2)
+        with t1:
+            kpi_card("Total net proceeds staged", inr(tranche_deploy_df["Net proceeds"].sum()),
+                      f"across {len(tranche_deploy_df)} exit legs", accent=True)
+        with t2:
+            kpi_card("Total deployed across categories", inr(totals.sum()), "sum of category columns above")
+
+        st.write("")
+        st.markdown("##### Category allocation per tranche")
+        fig_tr = go.Figure()
+        for i, cat in enumerate(categories):
+            fig_tr.add_bar(x=tranche_deploy_df["Leg"], y=tranche_deploy_df[cat], name=cat,
+                            marker_color=CAT_PALETTE[i % len(CAT_PALETTE)])
+        fig_tr.update_layout(**PLOTLY_LAYOUT, height=400, barmode="stack",
+                              yaxis=dict(title="Rs.", gridcolor="rgba(255,255,255,0.06)"),
                               xaxis=dict(showgrid=False))
-        st.plotly_chart(fig_pc, use_container_width=True)
+        st.plotly_chart(fig_tr, use_container_width=True)
+
+        st.markdown(
+            '<div class="section-note">Uses the % split from the Deployment Plan tab, applied to each leg\'s '
+            'estimated net proceeds from the Exit Plan tab — change either tab and this view updates with it.</div>',
+            unsafe_allow_html=True
+        )
