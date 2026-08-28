@@ -42,7 +42,7 @@ GREEN = "#3BAE87"
 RED = "#D9573F"
 SILVER = "#C7C8C6"
 BRONZE = "#C08A52"
-BORDER = "rgba(212,175,55,0.16)"
+BORDER = "rgba(212,175,55,0.50)"
 
 PLOTLY_LAYOUT = dict(
     template="plotly_dark",
