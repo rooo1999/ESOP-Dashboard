@@ -288,21 +288,43 @@ st.write("")
 def generate_schedule_for_grant(g):
     total, grant_dt = g["quantity"], g["grant_date"]
     cliff_m, years, pattern = g["cliff_months"], g["total_years"], g["vesting_type"]
+    total_months = years * 12
     rows = []
+
+    def build_cliff_based(period_m, label_fn):
+        """Cliff-anchored schedule: first tranche vests AT the cliff, subsequent
+        tranches every period_m months after that. The tranche count is chosen so
+        the LAST tranche lands as close as possible to grant_dt + total_years —
+        i.e. the cliff is treated as time already inside the total vesting period,
+        not as extra time tacked on after it. This keeps 'Total vesting period'
+        accurate regardless of the cliff length or how often tranches vest
+        (previously, patterns with a period that didn't evenly divide the cliff —
+        e.g. quarterly vesting with the default 12-month cliff — silently ran
+        past the stated total vesting period)."""
+        span_m = total_months - cliff_m
+        if span_m <= 0:
+            n = 1
+        else:
+            k_floor = max(int(span_m // period_m), 0)
+            k_ceil = k_floor + 1
+            diff_floor = abs(cliff_m + k_floor * period_m - total_months)
+            diff_ceil = abs(cliff_m + k_ceil * period_m - total_months)
+            # On an exact tie, prefer the shorter schedule rather than one that
+            # runs past the stated total vesting period.
+            best_k = k_floor if diff_floor <= diff_ceil else k_ceil
+            n = best_k + 1
+        per = total // n
+        rem = total - per * n
+        out = []
+        for i in range(n):
+            vd = grant_dt + relativedelta(months=cliff_m) + relativedelta(months=period_m * i)
+            out.append((label_fn(i), vd, int(per + (rem if i == n - 1 else 0))))
+        return out
+
     if pattern == "1-yr cliff + annual (4 yrs)":
-        n = years
-        per = total // n
-        rem = total - per * n
-        for i in range(n):
-            vd = grant_dt + relativedelta(months=cliff_m) + relativedelta(years=i)
-            rows.append((f"Year {i+1}", vd, int(per + (rem if i == n - 1 else 0))))
+        rows = build_cliff_based(12, lambda i: f"Year {i+1}")
     elif pattern == "1-yr cliff + quarterly (4 yrs)":
-        n = years * 4
-        per = total // n
-        rem = total - per * n
-        for i in range(n):
-            vd = grant_dt + relativedelta(months=cliff_m) + relativedelta(months=3 * i)
-            rows.append((f"Q{i+1}", vd, int(per + (rem if i == n - 1 else 0))))
+        rows = build_cliff_based(3, lambda i: f"Q{i+1}")
     elif pattern == "Straight-line monthly (no cliff)":
         n = years * 12
         per = total // n
@@ -312,13 +334,7 @@ def generate_schedule_for_grant(g):
             rows.append((f"M{i+1}", vd, int(per + (rem if i == n - 1 else 0))))
     else:  # Custom — cliff + chosen frequency
         period_m = FREQ_MONTHS[g["frequency"]]
-        span_m = years * 12 - cliff_m
-        n = max(1, round(span_m / period_m))
-        per = total // n
-        rem = total - per * n
-        for i in range(n):
-            vd = grant_dt + relativedelta(months=cliff_m) + relativedelta(months=period_m * i)
-            rows.append((f"{g['frequency'][:1]}{i+1}", vd, int(per + (rem if i == n - 1 else 0))))
+        rows = build_cliff_based(period_m, lambda i: f"{g['frequency'][:1]}{i+1}")
 
     df = pd.DataFrame(rows, columns=["Tranche", "Vest Date", "Quantity"])
     df["Grant"] = g["label"]
@@ -539,13 +555,13 @@ with tabs[1]:
         # Compare against the exact 1-year anniversary date above, not a flat 365-day count —
         # keeps this consistent with "LTCG eligible from" and correct across leap years.
         ex_df["Gain type today"] = np.where(today >= ex_df["LTCG eligible from"], "LTCG (12.5%)", "STCG (20%)")
-        ex_df["Notional gain (Rs.)"] = ex_df["Quantity"] * (current_price - ex_df["FMV at Exercise (Rs.)"])
+        ex_df["Notional gain (Rs.)"] = (ex_df["Quantity"] * (current_price - ex_df["FMV at Exercise (Rs.)"])).apply(inr)
         st.dataframe(
             ex_df,
             column_config={
                 "Exercise Date": st.column_config.DateColumn("Exercise Date"),
                 "LTCG eligible from": st.column_config.DateColumn("LTCG eligible from"),
-                "Notional gain (Rs.)": st.column_config.NumberColumn("Notional gain", format="Rs. %,.0f"),
+                "Notional gain (Rs.)": st.column_config.TextColumn("Notional gain"),
             },
             use_container_width=True, hide_index=True,
         )
@@ -703,13 +719,19 @@ with tabs[2]:
             })
 
         plan_df = pd.DataFrame(plan_rows)
+        # plan_df itself stays numeric — it feeds the chart below and the Deployment tabs.
+        # Build a display-only copy with Indian-format Rupee strings for the table.
+        plan_display_df = plan_df.copy()
+        plan_display_df["Est. price/share"] = plan_display_df["Est. price/share"].apply(lambda x: inr(x, 2))
+        for col in ["Gross value", "Est. tax", "Est. net proceeds"]:
+            plan_display_df[col] = plan_display_df[col].apply(inr)
         st.dataframe(
-            plan_df,
+            plan_display_df,
             column_config={
-                "Est. price/share": st.column_config.NumberColumn(format="Rs. %.2f"),
-                "Gross value": st.column_config.NumberColumn(format="Rs. %,.0f"),
-                "Est. tax": st.column_config.NumberColumn(format="Rs. %,.0f"),
-                "Est. net proceeds": st.column_config.NumberColumn(format="Rs. %,.0f"),
+                "Est. price/share": st.column_config.TextColumn("Est. price/share"),
+                "Gross value": st.column_config.TextColumn("Gross value"),
+                "Est. tax": st.column_config.TextColumn("Est. tax"),
+                "Est. net proceeds": st.column_config.TextColumn("Est. net proceeds"),
                 "Quantity": st.column_config.NumberColumn(format="%,d"),
             },
             use_container_width=True, hide_index=True,
@@ -984,20 +1006,20 @@ with tabs[3]:
             annual_net = annual_gross - annual_tax
             income_rows.append({
                 "Scenario": f"{label} ({rate:.1f}%)",
-                "Annual gross income": round(annual_gross),
-                "Estimated tax": round(annual_tax),
-                "Annual net income": round(annual_net),
-                "Monthly net income": round(annual_net / 12),
+                "Annual gross income": inr(annual_gross),
+                "Estimated tax": inr(annual_tax),
+                "Annual net income": inr(annual_net),
+                "Monthly net income": inr(annual_net / 12),
             })
         income_df = pd.DataFrame(income_rows)
 
         st.dataframe(
             income_df,
             column_config={
-                "Annual gross income": st.column_config.NumberColumn(format="Rs. %,.0f"),
-                "Estimated tax": st.column_config.NumberColumn(format="Rs. %,.0f"),
-                "Annual net income": st.column_config.NumberColumn(format="Rs. %,.0f"),
-                "Monthly net income": st.column_config.NumberColumn(format="Rs. %,.0f"),
+                "Annual gross income": st.column_config.TextColumn("Annual gross income"),
+                "Estimated tax": st.column_config.TextColumn("Estimated tax"),
+                "Annual net income": st.column_config.TextColumn("Annual net income"),
+                "Monthly net income": st.column_config.TextColumn("Monthly net income"),
             },
             use_container_width=True, hide_index=True,
         )
@@ -1110,15 +1132,17 @@ with tabs[4]:
         st.markdown("##### Rs. deployed by category, per tranche")
         st.caption("\"Deployed (check)\" is the sum across categories for that leg — it should match \"Net proceeds\" "
                    "exactly; that's the reconciliation this table is built to guarantee.")
-        col_config = {
-            "Net proceeds": st.column_config.NumberColumn(format="Rs. %,.0f"),
-            "Deployed (check)": st.column_config.NumberColumn(format="Rs. %,.0f"),
-        }
-        for cat in categories:
-            col_config[cat] = st.column_config.NumberColumn(format="Rs. %,.0f")
+        # tranche_deploy_df itself stays numeric — it feeds the totals, the reconciliation
+        # check, and the stacked chart below. Build a display-only copy with Indian-format
+        # Rupee strings for the table itself.
+        money_cols = ["Net proceeds", "Deployed (check)"] + categories
+        tranche_display_df = tranche_deploy_df.copy()
+        for col in money_cols:
+            tranche_display_df[col] = tranche_display_df[col].apply(inr)
+        col_config = {col: st.column_config.TextColumn(col) for col in money_cols}
 
         st.dataframe(
-            tranche_deploy_df,
+            tranche_display_df,
             column_order=["Leg", "Suggested date", "Net proceeds", "Deployed (check)"] + categories,
             column_config=col_config,
             use_container_width=True, hide_index=True,
@@ -1148,12 +1172,15 @@ with tabs[4]:
                            "fully deploy its net proceeds — when the two constraints can't both be met exactly "
                            "(e.g. very uneven leg sizes), the category's own total shifts slightly instead. Adjust "
                            "the timing schedule above to correct any of these.")
+                cat_check_display_df = cat_check_df.copy()
+                for col in ["Target corpus (Deployment Plan)", "Actually staged (this schedule)", "Difference"]:
+                    cat_check_display_df[col] = cat_check_display_df[col].apply(inr)
                 st.dataframe(
-                    cat_check_df,
+                    cat_check_display_df,
                     column_config={
-                        "Target corpus (Deployment Plan)": st.column_config.NumberColumn(format="Rs. %,.0f"),
-                        "Actually staged (this schedule)": st.column_config.NumberColumn(format="Rs. %,.0f"),
-                        "Difference": st.column_config.NumberColumn(format="Rs. %,.0f"),
+                        "Target corpus (Deployment Plan)": st.column_config.TextColumn("Target corpus (Deployment Plan)"),
+                        "Actually staged (this schedule)": st.column_config.TextColumn("Actually staged (this schedule)"),
+                        "Difference": st.column_config.TextColumn("Difference"),
                     },
                     use_container_width=True, hide_index=True,
                 )
