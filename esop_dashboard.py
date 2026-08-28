@@ -277,8 +277,7 @@ with st.sidebar:
 st.markdown(
     '<div class="section-note">Tax rates used below — LTCG 12.5% beyond a 1-year holding from the exercise date, '
     'STCG 20% within 1 year, Rs. 1.25L LTCG exemption per year, perquisite tax at the slab rate entered in the sidebar on exercise — '
-    'reflect rules as of FY2024-25. Please verify current rates before advising a client; this is a planning aid, '
-    'not tax or investment advice.</div>',
+    'reflect rules as of FY2024-25. </div>',
     unsafe_allow_html=True
 )
 st.write("")
