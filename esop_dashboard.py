@@ -31,16 +31,18 @@ except ImportError:
 # --------------------------------------------------------------------------
 st.set_page_config(page_title="ESOP Exit Planning Dashboard", layout="wide")
 
-NAVY_BG = "#0B0F1A"
-CARD_BG = "#121A2C"
-CARD_BG_2 = "#182238"
+NAVY_BG = "#050505"
+CARD_BG = "#101010"
+CARD_BG_2 = "#181818"
 GOLD = "#D4AF37"
 GOLD_SOFT = "#F0D584"
-TEXT = "#EDEFF4"
-MUTED = "#93A0B4"
-GREEN = "#38C793"
-RED = "#E9634B"
-BORDER = "rgba(212,175,55,0.18)"
+TEXT = "#F2F2F0"
+MUTED = "#A3A0A0"
+GREEN = "#3BAE87"
+RED = "#D9573F"
+SILVER = "#C7C8C6"
+BRONZE = "#C08A52"
+BORDER = "rgba(212,175,55,0.16)"
 
 PLOTLY_LAYOUT = dict(
     template="plotly_dark",
@@ -56,9 +58,9 @@ st.markdown(f"""
     @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap');
 
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; }}
-    .stApp {{ background: radial-gradient(circle at 20% 0%, #101a30 0%, {NAVY_BG} 55%); }}
+    .stApp {{ background: radial-gradient(circle at 15% -10%, #141414 0%, {NAVY_BG} 55%); }}
 
-    h1, h2, h3 {{ font-family: 'Fraunces', serif; color: {TEXT}; font-weight: 600; }}
+    h1, h2, h3, h4 {{ font-family: 'Fraunces', serif; color: {TEXT}; font-weight: 600; }}
     h1 {{ letter-spacing: 0.01em; }}
 
     .brand-row {{ display:flex; justify-content:space-between; align-items:baseline;
@@ -90,17 +92,34 @@ st.markdown(f"""
 
     .pill {{ display:inline-block; padding: 3px 10px; border-radius: 20px; font-size: 0.72rem;
              letter-spacing: 0.04em; font-weight: 600; }}
-    .pill-green {{ background: rgba(56,199,147,0.15); color: {GREEN}; border: 1px solid rgba(56,199,147,0.35); }}
+    .pill-green {{ background: rgba(59,174,135,0.15); color: {GREEN}; border: 1px solid rgba(59,174,135,0.35); }}
     .pill-gold {{ background: rgba(212,175,55,0.15); color: {GOLD_SOFT}; border: 1px solid rgba(212,175,55,0.35); }}
-    .pill-blue {{ background: rgba(111,168,220,0.15); color: #9CC3EE; border: 1px solid rgba(111,168,220,0.35); }}
-    .pill-purple {{ background: rgba(185,140,224,0.15); color: #CFA9EF; border: 1px solid rgba(185,140,224,0.35); }}
+    .pill-silver {{ background: rgba(199,200,198,0.12); color: {SILVER}; border: 1px solid rgba(199,200,198,0.30); }}
+    .pill-bronze {{ background: rgba(192,138,82,0.15); color: {BRONZE}; border: 1px solid rgba(192,138,82,0.35); }}
 
     div[data-testid="stMetricValue"] {{ color: {TEXT}; font-family: 'Fraunces', serif; }}
-    .stTabs [data-baseweb="tab"] {{ font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; font-size: 0.8rem; }}
+    div[data-testid="stMetricLabel"] {{ color: {MUTED}; }}
+    .stTabs [data-baseweb="tab"] {{ font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; font-size: 0.8rem; color: {MUTED}; }}
+    .stTabs [aria-selected="true"] {{ color: {TEXT} !important; }}
     .stTabs [data-baseweb="tab-highlight"] {{ background-color: {GOLD}; }}
-    section[data-testid="stSidebar"] {{ border-right: 1px solid {BORDER}; }}
+    section[data-testid="stSidebar"] {{ border-right: 1px solid {BORDER}; background-color: {NAVY_BG}; }}
     hr {{ border-color: {BORDER}; }}
     .stDataFrame {{ border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden; }}
+
+    .stButton > button {{
+        background: {CARD_BG}; border: 1px solid {BORDER}; color: {TEXT};
+        border-radius: 8px; font-weight: 500;
+    }}
+    .stButton > button:hover {{ border-color: {GOLD}; color: {GOLD_SOFT}; background: {CARD_BG_2}; }}
+    .stButton > button:focus:not(:active) {{ border-color: {GOLD}; color: {GOLD_SOFT}; }}
+
+    div[data-baseweb="input"], div[data-baseweb="select"] > div, div[data-baseweb="datepicker"] {{
+        background-color: {CARD_BG} !important; border-color: {BORDER} !important; border-radius: 8px !important;
+    }}
+    .streamlit-expanderHeader {{ background-color: {CARD_BG}; border-radius: 8px; }}
+    div[data-testid="stExpander"] {{ border: 1px solid {BORDER}; border-radius: 10px; }}
+
+    input[type="checkbox"], input[type="radio"] {{ accent-color: {GOLD}; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -376,7 +395,7 @@ with tabs[0]:
             kpi_card("Next vesting", "—", "All tranches vested")
 
     grants_list = sorted(edited["Grant"].unique())
-    palette = [GOLD, "#8AA0C7", "#5FB49C", "#C77DFF", "#E9634B", "#4FC3E0"]
+    palette = [GOLD, SILVER, BRONZE, GOLD_SOFT, "#8A8A8A", "#E4C98A"]
     fig = go.Figure()
     for i, gname in enumerate(grants_list):
         sub = edited[edited["Grant"] == gname]
@@ -491,7 +510,7 @@ with tabs[1]:
             labels=["Exercised", "Vested, unexercised", "Unvested"],
             values=[exercised_qty, not_exercised_vested_qty, upcoming_qty],
             hole=0.62,
-            marker=dict(colors=[GOLD, GOLD_SOFT, "#2A3550"], line=dict(color=NAVY_BG, width=2)),
+            marker=dict(colors=[GOLD, GOLD_SOFT, "#3A3A3A"], line=dict(color=NAVY_BG, width=2)),
             textinfo="label+percent", textfont=dict(color=TEXT, size=12),
         )])
         donut.update_layout(**PLOTLY_LAYOUT, height=320, showlegend=False,
@@ -691,9 +710,9 @@ with tabs[2]:
 # --------------------------------------------------------------------------
 # TAB 4 — DEPLOYMENT PLAN
 # --------------------------------------------------------------------------
-ASSET_COLORS = {"Equity": GOLD, "Debt": "#6FA8DC", "Commodity": "#B98CE0"}
-ASSET_PILL = {"Equity": "pill-gold", "Debt": "pill-blue", "Commodity": "pill-purple"}
-CAT_PALETTE = [GOLD, "#8AA0C7", "#5FB49C", "#6FA8DC", "#C77DFF", "#B98CE0", "#4FC3E0", "#E9634B"]
+ASSET_COLORS = {"Equity": GOLD, "Debt": SILVER, "Commodity": BRONZE}
+ASSET_PILL = {"Equity": "pill-gold", "Debt": "pill-silver", "Commodity": "pill-bronze"}
+CAT_PALETTE = [GOLD, SILVER, BRONZE, GOLD_SOFT, "#8A8A8A", "#E4C98A", "#9C7A4A"]
 
 DEPLOY_CATEGORIES = [
     {"Category": "Liquid",                      "Default %": 3,  "Return Low": 6,  "Return High": 7,  "Asset Class": "Debt"},
@@ -707,24 +726,21 @@ DEPLOY_CATEGORIES = [
 
 with tabs[3]:
     st.subheader("Where the exited money goes")
+    st.caption("Defaults to the net proceeds from the Exit Plan tab — adjust as needed, then edit each category's amount below.")
 
     suggested_corpus_cr = st.session_state.get("exit_plan_total_net", 0.0) / 1e7
-    d1, d2 = st.columns([2, 1])
-    with d1:
-        st.caption("Defaults to the net proceeds from the Exit Plan tab — adjust as needed, then edit each category's amount below.")
-    with d2:
-        kpi_card("Suggested corpus (from Exit Plan)", inr(st.session_state.get("exit_plan_total_net", 0.0)),
-                  f"~ Rs. {suggested_corpus_cr:.2f} Cr net proceeds")
-
-    reset_col1, reset_col2 = st.columns([1, 3])
-    with reset_col1:
+    cin1, cin2, cin3 = st.columns([1.2, 1.3, 1])
+    with cin1:
         base_corpus_cr = st.number_input("Corpus to split (Rs. Cr)", min_value=0.0,
                                           value=round(suggested_corpus_cr, 2) if suggested_corpus_cr > 0 else 30.0,
                                           step=0.5)
-    with reset_col2:
+    with cin2:
+        st.metric("Suggested corpus (from Exit Plan)", f"Rs. {suggested_corpus_cr:.2f} Cr",
+                   help="Net proceeds computed on the Exit Plan tab.")
+    with cin3:
         st.write("")
         st.write("")
-        reset_clicked = st.button("Reset all categories to the default split above")
+        reset_clicked = st.button("Reset to default split")
 
     if "deploy_df" not in st.session_state or reset_clicked:
         rows = []
