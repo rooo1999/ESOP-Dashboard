@@ -42,7 +42,7 @@ GREEN = "#3BAE87"
 RED = "#D9573F"
 SILVER = "#C7C8C6"
 BRONZE = "#C08A52"
-BORDER = "rgba(212,175,55,0.50)"
+BORDER = "rgba(212,175,55,0.16)"
 
 PLOTLY_LAYOUT = dict(
     template="plotly_dark",
@@ -113,8 +113,8 @@ st.markdown(f"""
     .stButton > button:hover {{ border-color: {GOLD}; color: {GOLD_SOFT}; background: {CARD_BG_2}; }}
     .stButton > button:focus:not(:active) {{ border-color: {GOLD}; color: {GOLD_SOFT}; }}
 
-    div[data-baseweb="input"], div[data-baseweb="select"] > div, div[data-baseweb="datepicker"] {{
-        background-color: {CARD_BG} !important; border-color: {BORDER} !important; border-radius: 8px !important;
+    div[data-testid$="RootElement"], div[data-testid$="Container"], div[data-testid="stDateInputField"] {{
+        background-color: {CARD_BG} !important; border: 1px solid rgba(212,175,55,0.5) !important; border-radius: 8px !important;
     }}
     .streamlit-expanderHeader {{ background-color: {CARD_BG}; border-radius: 8px; }}
     div[data-testid="stExpander"] {{ border: 1px solid {BORDER}; border-radius: 10px; }}
@@ -598,17 +598,31 @@ with tabs[2]:
         exercised_pool = [[int(r["Quantity"]), r["Exercise Date"], float(r["FMV at Exercise (Rs.)"])]
                            for _, r in ex_lots.iterrows()]
 
-        unexercised_qty_total = int(edited.loc[unexercised_vested_mask, "Quantity"].sum())
+        # Shares that haven't vested yet today but WILL vest by lock-in end are also part of
+        # exitable_full_qty (see Tab 3 above) — they must be included here too, or the sell pool
+        # runs short of exitable_full_qty and the shortfall silently gets 0% tax applied further down.
+        future_vesting_mask = (edited["Vest Date"] > today) & (edited["Vest Date"] <= lockin_end)
+        to_exercise_at_sale_mask = unexercised_vested_mask | future_vesting_mask
+
+        unexercised_qty_total = int(edited.loc[to_exercise_at_sale_mask, "Quantity"].sum())
         unexercised_qty_total = int(round(unexercised_qty_total * keep_frac))
         avg_strike_unexercised = (
-            float((edited.loc[unexercised_vested_mask, "Quantity"] * edited.loc[unexercised_vested_mask, "Strike Price"]).sum() /
-                  edited.loc[unexercised_vested_mask, "Quantity"].sum())
-            if edited.loc[unexercised_vested_mask, "Quantity"].sum() > 0 else 0.0
+            float((edited.loc[to_exercise_at_sale_mask, "Quantity"] * edited.loc[to_exercise_at_sale_mask, "Strike Price"]).sum() /
+                  edited.loc[to_exercise_at_sale_mask, "Quantity"].sum())
+            if edited.loc[to_exercise_at_sale_mask, "Quantity"].sum() > 0 else 0.0
         )
+
+        LTCG_EXEMPTION_PER_FY = 125000.0
+
+        def fy_label(ts):
+            """Indian financial year (Apr-Mar) label for a timestamp, e.g. '2025-26'."""
+            y = ts.year if ts.month >= 4 else ts.year - 1
+            return f"{y}-{str(y + 1)[-2:]}"
 
         plan_rows = []
         remaining_unexercised = unexercised_qty_total
         pool_idx = 0
+        ltcg_exemption_left = {}  # FY label -> exemption still available
 
         for i in range(n_legs):
             leg_date = lockin_end + pd.DateOffset(months=int(round(i * spread_months / max(n_legs - 1, 1))))
@@ -619,7 +633,9 @@ with tabs[2]:
             projected_price = current_price * ((1 + monthly_rate) ** months_out)
 
             still_needed = leg_qty
-            tax_total = 0.0
+            ltcg_gain_leg = 0.0
+            stcg_gain_leg = 0.0
+            other_tax_leg = 0.0  # perquisite tax on cashless-exercised-then-sold shares
             treatments = set()
 
             while still_needed > 0 and pool_idx < len(exercised_pool):
@@ -632,9 +648,11 @@ with tabs[2]:
                 still_needed -= take
                 held_days = (leg_date - lot_date).days
                 long_term = held_days >= 365
-                rate = 0.125 if long_term else 0.20
                 gain = max(take * (projected_price - lot_fmv), 0)
-                tax_total += gain * rate
+                if long_term:
+                    ltcg_gain_leg += gain
+                else:
+                    stcg_gain_leg += gain
                 treatments.add("LTCG" if long_term else "STCG")
                 if exercised_pool[pool_idx][0] <= 0:
                     pool_idx += 1
@@ -644,8 +662,18 @@ with tabs[2]:
                 remaining_unexercised -= take
                 still_needed -= take
                 perq_gain_leg = max(take * (projected_price - avg_strike_unexercised), 0)
-                tax_total += perq_gain_leg * (slab_map[tax_slab] + cess)
+                other_tax_leg += perq_gain_leg * (slab_map[tax_slab] + cess)
                 treatments.add("Exercise + Sale")
+
+            # Rs. 1.25L LTCG exemption, tracked per Indian financial year across all legs —
+            # only the portion of this leg's LTCG gain beyond the year's remaining exemption is taxed.
+            fy = fy_label(leg_date)
+            exemption_left = ltcg_exemption_left.get(fy, LTCG_EXEMPTION_PER_FY)
+            exemption_used = min(ltcg_gain_leg, exemption_left)
+            ltcg_exemption_left[fy] = exemption_left - exemption_used
+            taxable_ltcg = ltcg_gain_leg - exemption_used
+
+            tax_total = taxable_ltcg * 0.125 + stcg_gain_leg * 0.20 + other_tax_leg
 
             gross_value = leg_qty * projected_price
             net_value = gross_value - tax_total
@@ -678,8 +706,8 @@ with tabs[2]:
             'sidebar (0% by default) — treat this as a planning scenario, not a forecast. Already-exercised lots '
             'are sold oldest-first (FIFO) to favour long-term treatment; unexercised shares assume a cashless '
             'exercise at the time of sale, so their tax is shown mainly as perquisite tax. Confirm treatment with '
-            'a tax advisor before execution, especially around the Rs. 1.25L annual LTCG exemption and surcharge '
-            'on high incomes.</div>',
+            'a tax advisor before execution — the Rs. 1.25L annual LTCG exemption is applied per financial year '
+            'across these legs, but surcharge on high incomes is not modeled.</div>',
             unsafe_allow_html=True
         )
 
