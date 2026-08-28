@@ -757,6 +757,43 @@ DEPLOY_CATEGORIES = [
     {"Category": "Private Equity",                 "Default %": 10, "Return Low": 17, "Return High": 19, "Asset Class": "Equity",  "Liquidity": "Low"},
 ]
 
+# Base timing schedule — % of each category's total corpus deployed at t1, t2, t3, t4.
+# Front-loaded for liquid, spread across the early legs for equity/intl/commodities,
+# mid-loaded for the PMS satellite sleeve, and back-loaded for the less liquid sleeves
+# (private credit/REIT/InvIT, private equity) that typically call capital later.
+BASE_TRANCHE_SCHEDULE = {
+    "Liquid":                      [100, 0, 0, 0],
+    "Core Equity":                 [50, 25, 25, 0],
+    "PMS Satellite":               [0, 50, 50, 0],
+    "Pvt Credit / REIT / InvIT":   [0, 50, 25, 25],
+    "International":               [50, 25, 25, 0],
+    "Commodities":                 [50, 25, 25, 0],
+    "Private Equity":              [0, 0, 50, 50],
+}
+
+
+def stretch_schedule(base_pcts, n_out):
+    """Resample a schedule of percentages onto n_out tranches, preserving the total and the
+    overall shape. Treats base_pcts as a step function over [0, 1] (each entry an equal-width
+    stage) and re-bins it onto n_out equal-width stages by overlapping area — so a 4-stage
+    front-loaded schedule stays proportionally front-loaded whether stretched to 2 tranches
+    or 8. When n_out equals len(base_pcts), this returns base_pcts unchanged."""
+    n_in = len(base_pcts)
+    if n_out <= 0 or n_in == 0:
+        return []
+    out = [0.0] * n_out
+    for i in range(n_in):
+        in_start, in_end = i / n_in, (i + 1) / n_in
+        val = base_pcts[i]
+        if val == 0:
+            continue
+        for j in range(n_out):
+            out_start, out_end = j / n_out, (j + 1) / n_out
+            overlap = max(0.0, min(in_end, out_end) - max(in_start, out_start))
+            if overlap > 0:
+                out[j] += val * (overlap / (in_end - in_start))
+    return out
+
 with tabs[3]:
     st.subheader("Where the exited money goes")
     st.caption("Defaults to the net proceeds from the Exit Plan tab — adjust as needed, then edit each category's amount below.")
@@ -809,6 +846,7 @@ with tabs[3]:
     liquidity_map = {c["Category"]: c["Liquidity"] for c in DEPLOY_CATEGORIES}
     deploy_view["Liquidity"] = deploy_view["Category"].map(liquidity_map)
     st.session_state["deploy_split_pct"] = deploy_view.set_index("Category")["% of Total"].to_dict()
+    st.session_state["deploy_amounts_cr"] = deploy_view.set_index("Category")["Amount (Rs. Cr)"].to_dict()
 
     st.write("")
     t1, t2 = st.columns(2)
@@ -922,27 +960,72 @@ with tabs[3]:
 # --------------------------------------------------------------------------
 with tabs[4]:
     st.subheader("Where each exit tranche's money goes")
-    st.caption("Applies the category split from the Deployment Plan tab to the net proceeds of each exit leg from the "
-               "Exit Plan tab, so you can see where every tranche's money is earmarked to land.")
+    st.caption("Each category has its own timing — some front-loaded, some staged mid-way, some called later. "
+               "The schedule below is stretched proportionally from a base t1\u2013t4 pattern to however many exit "
+               "legs your Exit Plan actually has, and is fully editable.")
 
     tranche_plan_df = st.session_state.get("exit_plan_df", pd.DataFrame())
-    split_pct = st.session_state.get("deploy_split_pct", {})
+    amounts_cr = st.session_state.get("deploy_amounts_cr", {})
 
-    if tranche_plan_df.empty or not split_pct:
+    if tranche_plan_df.empty or not amounts_cr:
         st.info("Set up an exit plan (Exit Plan tab) and a deployment split (Deployment Plan tab) first — "
                 "this tab combines the two.")
     else:
         categories = [c["Category"] for c in DEPLOY_CATEGORIES]
+        leg_labels = list(tranche_plan_df["Leg"])
+        n_out = len(leg_labels)
+
+        schedule_reset = st.button("Reset to suggested schedule")
+
+        shape_key = tuple(leg_labels)
+        if ("tranche_schedule_df" not in st.session_state
+                or st.session_state.get("tranche_schedule_shape") != shape_key
+                or schedule_reset):
+            sched_rows = []
+            for cat in categories:
+                stretched = stretch_schedule(BASE_TRANCHE_SCHEDULE.get(cat, [0] * 4), n_out)
+                row = {"Category": cat}
+                row.update({leg: round(v, 1) for leg, v in zip(leg_labels, stretched)})
+                sched_rows.append(row)
+            st.session_state.tranche_schedule_df = pd.DataFrame(sched_rows)
+            st.session_state.tranche_schedule_shape = shape_key
+
+        schedule_col_config = {"Category": st.column_config.TextColumn("Category", disabled=True)}
+        for leg in leg_labels:
+            schedule_col_config[leg] = st.column_config.NumberColumn(f"{leg} (%)", min_value=0.0, max_value=100.0, step=1.0)
+
+        st.caption("% of each category's total corpus deployed at each exit leg — edit any cell.")
+        schedule_edited = st.data_editor(
+            st.session_state.tranche_schedule_df,
+            column_config=schedule_col_config,
+            disabled=["Category"],
+            num_rows="fixed",
+            use_container_width=True,
+            hide_index=True,
+            key="tranche_schedule_editor",
+        )
+        st.session_state.tranche_schedule_df = schedule_edited
+
+        row_sums = schedule_edited[leg_labels].sum(axis=1)
+        off_rows = schedule_edited.loc[(row_sums - 100).abs() > 0.5, "Category"].tolist()
+        if off_rows:
+            st.warning("These categories don't add up to 100% across the tranches: " + ", ".join(off_rows))
+
+        # Rs. amount deployed per category per leg = category's total corpus x that leg's % share.
         rows = []
         for _, leg in tranche_plan_df.iterrows():
-            row = {"Leg": leg["Leg"], "Suggested date": leg["Suggested date"],
-                   "Net proceeds": leg["Est. net proceeds"]}
+            leg_name = leg["Leg"]
+            row = {"Leg": leg_name, "Suggested date": leg["Suggested date"], "Net proceeds": leg["Est. net proceeds"]}
             for cat in categories:
-                pct = split_pct.get(cat, 0.0)
-                row[cat] = leg["Est. net proceeds"] * pct / 100
+                pct_row = schedule_edited.loc[schedule_edited["Category"] == cat, leg_name]
+                pct = float(pct_row.iloc[0]) if not pct_row.empty else 0.0
+                cat_total_rs = float(amounts_cr.get(cat, 0.0)) * 1e7
+                row[cat] = cat_total_rs * pct / 100
             rows.append(row)
         tranche_deploy_df = pd.DataFrame(rows)
 
+        st.write("")
+        st.markdown("##### Rs. deployed by category, per tranche")
         col_config = {"Net proceeds": st.column_config.NumberColumn(format="Rs. %,.0f")}
         for cat in categories:
             col_config[cat] = st.column_config.NumberColumn(format="Rs. %,.0f")
@@ -973,7 +1056,8 @@ with tabs[4]:
         st.plotly_chart(fig_tr, use_container_width=True)
 
         st.markdown(
-            '<div class="section-note">Uses the % split from the Deployment Plan tab, applied to each leg\'s '
-            'estimated net proceeds from the Exit Plan tab — change either tab and this view updates with it.</div>',
+            '<div class="section-note">Each category\'s total corpus (from the Deployment Plan tab) is staged across '
+            'exit legs per the schedule above, not split evenly per leg — adjust the schedule as your view on timing '
+            'changes, or hit "Reset to suggested schedule" to go back to the stretched default.</div>',
             unsafe_allow_html=True
         )
